@@ -36,13 +36,19 @@ impl<T: Send> Future<T> for FutureVal<T> {
             return;
         }
 
-        l.completion = Callback(box cb);
+        l.completion = ConsumerCb(box cb);
     }
 }
 
 impl<T: Send> SyncFuture<T> for FutureVal<T> {
     fn take(self) -> T {
         let mut l = self.core.lock();
+
+        if let CompleterCb(cb) = l.take_completer_cb() {
+            drop(l);
+            cb.call_once((Completer { core: self.core.clone() },));
+            l = self.core.lock();
+        }
 
         l.completion = Wait;
 
@@ -83,7 +89,7 @@ impl<T: Send> Completer<T> {
     pub fn complete(self, val: T) {
         let mut l = self.core.lock();
 
-        if let Callback(cb) = l.take_callback() {
+        if let ConsumerCb(cb) = l.take_consumer_cb() {
             drop(l);
             cb.call_once((val,));
             return;
@@ -94,6 +100,46 @@ impl<T: Send> Completer<T> {
         if l.completion.is_wait() {
             l.condvar.signal();
         }
+    }
+}
+
+/*
+ *
+ * ===== Consumer interest future =====
+ *
+ */
+
+impl<T: Send> Future<Completer<T>> for Completer<T> {
+    fn is_complete(&self) -> bool {
+        let mut l = self.core.lock();
+        !l.completion.is_pending()
+    }
+
+    fn receive<F: FnOnce(Completer<T>) -> () + Send>(self, cb: F) {
+        {
+            let mut l = self.core.lock();
+
+            if l.completion.is_pending() {
+                l.completion = CompleterCb(box cb);
+                return;
+            }
+
+            drop(l);
+        }
+
+        // The consumer is currently waiting, invoke the callback
+        cb(self);
+    }
+}
+
+impl<T: Send> SyncFuture<Completer<T>> for Completer<T> {
+    fn take(self) -> Completer<T> {
+        unimplemented!()
+    }
+
+    /// Gets the value from the future if it has been completed.
+    fn try_take(self) -> Result<Completer<T>, Completer<T>> {
+        unimplemented!()
     }
 }
 
@@ -121,8 +167,16 @@ impl<T: Send> Core<T> {
         mem::replace(&mut self.val, None)
     }
 
-    fn take_callback(&mut self) -> Completion<T> {
-        if self.completion.is_callback() {
+    fn take_consumer_cb(&mut self) -> Completion<T> {
+        if self.completion.is_consumer_cb() {
+            mem::replace(&mut self.completion, Pending)
+        } else {
+            Pending
+        }
+    }
+
+    fn take_completer_cb(&mut self) -> Completion<T> {
+        if self.completion.is_completer_cb() {
             mem::replace(&mut self.completion, Pending)
         } else {
             Pending
@@ -133,7 +187,8 @@ impl<T: Send> Core<T> {
 enum Completion<T> {
     Pending,
     Wait,
-    Callback(Box<FnOnce<(T,),()> + Send>),
+    ConsumerCb(Box<FnOnce<(T,),()> + Send>),
+    CompleterCb(Box<FnOnce<(Completer<T>,),()> + Send>),
 }
 
 impl<T: Send> Completion<T> {
@@ -151,9 +206,16 @@ impl<T: Send> Completion<T> {
         }
     }
 
-    fn is_callback(&self) -> bool {
+    fn is_consumer_cb(&self) -> bool {
         match *self {
-            Callback(..) => true,
+            ConsumerCb(..) => true,
+            _ => false,
+        }
+    }
+
+    fn is_completer_cb(&self) -> bool {
+        match *self {
+            CompleterCb(..) => true,
             _ => false,
         }
     }
@@ -163,8 +225,10 @@ impl<T: Send> Completion<T> {
 mod test {
     use std::io::timer::sleep;
     use std::time::Duration;
-    use super::*;
+    use sync::Arc;
+    use sync::atomic::{AtomicBool, Relaxed};
     use future::{Future, SyncFuture};
+    use super::*;
 
     #[test]
     pub fn test_complete_before_take() {
@@ -230,4 +294,39 @@ mod test {
         f.receive(move |:v| tx.send(v));
         assert_eq!(rx.recv(), "zomg");
     }
+
+    #[test]
+    pub fn test_registering_consumer_interest_handler_take1() {
+        let (f, c) = future::<&'static str>();
+        let w1 = Arc::new(AtomicBool::new(false));
+        let w2 = w1.clone();
+
+        c.receive(move |:c2: Completer<&'static str>| {
+            assert!(w2.load(Relaxed));
+            c2.complete("zomg");
+        });
+
+        w1.store(true, Relaxed);
+        assert_eq!(f.take(), "zomg");
+    }
+
+    #[test]
+    pub fn test_registering_consumer_interest_handler_take2() {
+        let (f, c) = future::<&'static str>();
+        let w1 = Arc::new(AtomicBool::new(false));
+        let w2 = w1.clone();
+
+        spawn(proc() {
+            sleep(Duration::milliseconds(50));
+
+            c.receive(move |:c2: Completer<&'static str>| {
+                assert!(w2.load(Relaxed));
+                c2.complete("zomg");
+            });
+        });
+
+        w1.store(true, Relaxed);
+        assert_eq!(f.take(), "zomg");
+    }
+
 }

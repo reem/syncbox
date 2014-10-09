@@ -1,4 +1,5 @@
+use super::{Future};
 
-pub trait Stream<T> {
-    fn each<F: Fn(T) -> () + Send>>(self, cb: F);
+pub trait Stream<T> : Future<Option<(T, Self)>> {
+    fn each<F: Fn(T) -> () + Send>(self, cb: F);
 }
