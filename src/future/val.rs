@@ -4,7 +4,7 @@
 //! handle synchronization. However, this will eventually be
 //! re-implemented using lock free strategies once the API stabalizes.
 
-use std::mem;
+use std::{fmt, mem};
 use sync::{Arc, MutexCell, CondVar};
 use super::{Future, SyncFuture};
 
@@ -22,6 +22,11 @@ pub struct FutureVal<T> {
 }
 
 impl<T: Send> Future<T> for FutureVal<T> {
+    fn is_complete(&self) -> bool {
+        let mut l = self.core.lock();
+        !l.completion.is_pending()
+    }
+
     fn receive<F: FnOnce<(T,), ()> + Send>(self, cb: F) {
         let mut l = self.core.lock();
 
@@ -39,17 +44,34 @@ impl<T: Send> SyncFuture<T> for FutureVal<T> {
     fn take(self) -> T {
         let mut l = self.core.lock();
 
-        if let Some(v) = l.take_val() {
-            return v;
-        }
-
         l.completion = Wait;
-        l.wait(&l.condvar);
-        l.take_val().unwrap()
+
+        loop {
+            if let Some(v) = l.take_val() {
+                return v;
+            }
+
+            l.wait(&l.condvar);
+        }
     }
 
     fn try_take(self) -> Result<T, FutureVal<T>> {
-        unimplemented!();
+        {
+            let mut l = self.core.lock();
+
+            if let Some(v) = l.take_val() {
+                return Ok(v);
+            }
+        }
+
+        Err(self)
+    }
+}
+
+impl<T: fmt::Show> fmt::Show for FutureVal<T> {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        try!(write!(fmt, "FutureVal"));
+        Ok(())
     }
 }
 
@@ -70,7 +92,6 @@ impl<T: Send> Completer<T> {
         l.put(val);
 
         if l.completion.is_wait() {
-            println!("signaling cond var");
             l.condvar.signal();
         }
     }
@@ -116,6 +137,13 @@ enum Completion<T> {
 }
 
 impl<T: Send> Completion<T> {
+    fn is_pending(&self) -> bool {
+        match *self {
+            Pending => true,
+            _ => false,
+        }
+    }
+
     fn is_wait(&self) -> bool {
         match *self {
             Wait => true,
@@ -160,6 +188,19 @@ mod test {
         });
 
         assert_eq!(f.take(), "zomg");
+    }
+
+    #[test]
+    pub fn test_try_take_no_val() {
+        let (f, _) = future::<uint>();
+        assert!(f.try_take().is_err());
+    }
+
+    #[test]
+    pub fn test_try_take_val() {
+        let (f, c) = future();
+        c.complete("hello");
+        assert_eq!(f.try_take().unwrap(), "hello");
     }
 
     #[test]

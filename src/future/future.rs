@@ -1,4 +1,7 @@
 pub trait Future<T> {
+    /// Whether or not the future is complete
+    fn is_complete(&self) -> bool;
+
     /// When the future is complete, call the supplied function with the
     /// value.
     fn receive<F: FnOnce<(T,), ()> + Send>(self, cb: F);
