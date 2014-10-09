@@ -8,7 +8,7 @@ use std::{fmt, mem};
 use sync::{Arc, MutexCell, CondVar};
 use super::{Future, SyncFuture};
 
-pub fn future<T:Send>() -> (FutureVal<T>, Completer<T>) {
+pub fn future<T: Send>() -> (FutureVal<T>, Completer<T>) {
     let core = Arc::new(MutexCell::new(Core::new()));
 
     let f = FutureVal { core: core.clone() };
@@ -27,7 +27,7 @@ impl<T: Send> Future<T> for FutureVal<T> {
         !l.completion.is_pending()
     }
 
-    fn receive<F: FnOnce<(T,), ()> + Send>(self, cb: F) {
+    fn receive<F: FnOnce(T) -> () + Send>(self, cb: F) {
         let mut l = self.core.lock();
 
         if let Some(v) = l.take_val() {
@@ -103,7 +103,7 @@ struct Core<T> {
     completion: Completion<T>,
 }
 
-impl<T:Send> Core<T> {
+impl<T: Send> Core<T> {
     fn new() -> Core<T> {
         Core {
             val: None,

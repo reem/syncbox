@@ -4,7 +4,7 @@ pub trait Future<T> {
 
     /// When the future is complete, call the supplied function with the
     /// value.
-    fn receive<F: FnOnce<(T,), ()> + Send>(self, cb: F);
+    fn receive<F: FnOnce(T) -> () + Send>(self, cb: F);
 }
 
 pub trait SyncFuture<T> {
