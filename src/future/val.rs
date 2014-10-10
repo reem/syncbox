@@ -30,6 +30,12 @@ impl<T: Send> Future<T> for FutureVal<T> {
     fn receive<F: FnOnce(T) -> () + Send>(self, cb: F) {
         let mut l = self.core.lock();
 
+        if let CompleterCb(cb) = l.take_completer_cb() {
+            drop(l);
+            cb.call_once((Completer { core: self.core.clone() },));
+            l = self.core.lock();
+        }
+
         if let Some(v) = l.take_val() {
             drop(l); // Escape the mutex
             cb(v);
@@ -296,14 +302,14 @@ mod test {
     }
 
     #[test]
-    pub fn test_registering_consumer_interest_handler_take1() {
+    pub fn test_receive_complete_future_before_take() {
         let (f, c) = future::<&'static str>();
         let w1 = Arc::new(AtomicBool::new(false));
         let w2 = w1.clone();
 
-        c.receive(move |:c2: Completer<&'static str>| {
+        c.receive(move |:c: Completer<&'static str>| {
             assert!(w2.load(Relaxed));
-            c2.complete("zomg");
+            c.complete("zomg");
         });
 
         w1.store(true, Relaxed);
@@ -311,17 +317,17 @@ mod test {
     }
 
     #[test]
-    pub fn test_registering_consumer_interest_handler_take2() {
-        let (f, c) = future::<&'static str>();
+    pub fn test_receive_complete_future_after_take() {
+        let (f, c) = future();
         let w1 = Arc::new(AtomicBool::new(false));
         let w2 = w1.clone();
 
         spawn(proc() {
             sleep(Duration::milliseconds(50));
 
-            c.receive(move |:c2: Completer<&'static str>| {
+            c.receive(move |:c: Completer<&'static str>| {
                 assert!(w2.load(Relaxed));
-                c2.complete("zomg");
+                c.complete("zomg");
             });
         });
 
@@ -329,4 +335,51 @@ mod test {
         assert_eq!(f.take(), "zomg");
     }
 
+    #[test]
+    pub fn test_receive_complete_future_before_consumer_receive() {
+        let (f, c) = future();
+        let w1 = Arc::new(AtomicBool::new(false));
+        let w2 = w1.clone();
+
+        c.receive(move |:c: Completer<&'static str>| {
+            assert!(w2.load(Relaxed));
+            c.complete("zomg");
+        });
+
+        let (tx, rx) = channel();
+        w1.store(true, Relaxed);
+
+        f.receive(move |:msg| {
+            assert_eq!("zomg", msg);
+            tx.send("hi2u");
+        });
+
+        assert_eq!("hi2u", rx.recv());
+    }
+
+    #[test]
+    pub fn test_receive_complete_future_after_consumer_receive() {
+        let (f, c) = future();
+        let w1 = Arc::new(AtomicBool::new(false));
+        let w2 = w1.clone();
+
+        spawn(proc() {
+            sleep(Duration::milliseconds(50));
+
+            c.receive(move |:c: Completer<&'static str>| {
+                assert!(w2.load(Relaxed));
+                c.complete("zomg");
+            });
+        });
+
+        let (tx, rx) = channel();
+        w1.store(true, Relaxed);
+
+        f.receive(move |:msg| {
+            assert_eq!("zomg", msg);
+            tx.send("hi2u");
+        });
+
+        assert_eq!("hi2u", rx.recv());
+    }
 }
