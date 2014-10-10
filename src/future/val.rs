@@ -34,6 +34,10 @@ impl<T: Send> Future<T> for FutureVal<T> {
             drop(l);
             cb.call_once((Completer { core: self.core.clone() },));
             l = self.core.lock();
+        } else {
+            if l.completion.is_completer_wait() {
+                l.condvar.signal();
+            }
         }
 
         if let Some(v) = l.take_val() {
@@ -429,17 +433,41 @@ mod test {
 
     #[test]
     pub fn test_take_complete_after_consumer_take() {
-        assert!(true);
+        let (f, c) = future();
+
+        spawn(proc() {
+            sleep(Duration::milliseconds(50));
+            c.take().complete("zomg");
+        });
+
+        assert_eq!("zomg", f.take());
     }
 
     #[test]
     pub fn test_take_complete_before_consumer_receive() {
-        assert!(true);
+        let (f, c) = future();
+        let (tx, rx) = channel::<&'static str>();
+
+        spawn(proc() {
+            c.take().complete("zomg");
+        });
+
+        sleep(Duration::milliseconds(50));
+        f.receive(move |:v| tx.send(v));
+        assert_eq!(rx.recv(), "zomg");
     }
 
     #[test]
     pub fn test_take_complete_after_consumer_receive() {
-        assert!(true);
-    }
+        let (f, c) = future();
+        let (tx, rx) = channel::<&'static str>();
 
+        spawn(proc() {
+            sleep(Duration::milliseconds(50));
+            c.take().complete("zomg");
+        });
+
+        f.receive(move |:v| tx.send(v));
+        assert_eq!(rx.recv(), "zomg");
+    }
 }
