@@ -54,9 +54,13 @@ impl<T: Send> SyncFuture<T> for FutureVal<T> {
             drop(l);
             cb.call_once((Completer { core: self.core.clone() },));
             l = self.core.lock();
+        } else {
+            if l.completion.is_completer_wait() {
+                l.condvar.signal();
+            }
         }
 
-        l.completion = Wait;
+        l.completion = ConsumerWait;
 
         loop {
             if let Some(v) = l.take_val() {
@@ -103,7 +107,7 @@ impl<T: Send> Completer<T> {
 
         l.put(val);
 
-        if l.completion.is_wait() {
+        if l.completion.is_consumer_wait() {
             l.condvar.signal();
         }
     }
@@ -140,12 +144,32 @@ impl<T: Send> Future<Completer<T>> for Completer<T> {
 
 impl<T: Send> SyncFuture<Completer<T>> for Completer<T> {
     fn take(self) -> Completer<T> {
-        unimplemented!()
+        {
+            let mut l = self.core.lock();
+
+            if l.completion.is_pending() {
+                l.completion = CompleterWait;
+
+                loop {
+                    l.wait(&l.condvar);
+
+                    if !l.completion.is_completer_wait() {
+                        break;
+                    }
+                }
+            }
+        }
+
+        self
     }
 
     /// Gets the value from the future if it has been completed.
     fn try_take(self) -> Result<Completer<T>, Completer<T>> {
-        unimplemented!()
+        if self.is_complete() {
+            Ok(self)
+        } else {
+            Err(self)
+        }
     }
 }
 
@@ -192,7 +216,8 @@ impl<T: Send> Core<T> {
 
 enum Completion<T> {
     Pending,
-    Wait,
+    ConsumerWait,
+    CompleterWait,
     ConsumerCb(Box<FnOnce<(T,),()> + Send>),
     CompleterCb(Box<FnOnce<(Completer<T>,),()> + Send>),
 }
@@ -205,9 +230,16 @@ impl<T: Send> Completion<T> {
         }
     }
 
-    fn is_wait(&self) -> bool {
+    fn is_consumer_wait(&self) -> bool {
         match *self {
-            Wait => true,
+            ConsumerWait => true,
+            _ => false,
+        }
+    }
+
+    fn is_completer_wait(&self) -> bool {
+        match *self {
+            CompleterWait => true,
             _ => false,
         }
     }
@@ -336,7 +368,7 @@ mod test {
     }
 
     #[test]
-    pub fn test_receive_complete_future_before_consumer_receive() {
+    pub fn test_receive_complete_before_consumer_receive() {
         let (f, c) = future();
         let w1 = Arc::new(AtomicBool::new(false));
         let w2 = w1.clone();
@@ -358,7 +390,7 @@ mod test {
     }
 
     #[test]
-    pub fn test_receive_complete_future_after_consumer_receive() {
+    pub fn test_receive_complete_after_consumer_receive() {
         let (f, c) = future();
         let w1 = Arc::new(AtomicBool::new(false));
         let w2 = w1.clone();
@@ -382,4 +414,32 @@ mod test {
 
         assert_eq!("hi2u", rx.recv());
     }
+
+    #[test]
+    pub fn test_take_complete_before_consumer_take() {
+        let (f, c) = future();
+
+        spawn(proc() {
+            c.take().complete("zomg");
+        });
+
+        sleep(Duration::milliseconds(50));
+        assert_eq!("zomg", f.take());
+    }
+
+    #[test]
+    pub fn test_take_complete_after_consumer_take() {
+        assert!(true);
+    }
+
+    #[test]
+    pub fn test_take_complete_before_consumer_receive() {
+        assert!(true);
+    }
+
+    #[test]
+    pub fn test_take_complete_after_consumer_receive() {
+        assert!(true);
+    }
+
 }
