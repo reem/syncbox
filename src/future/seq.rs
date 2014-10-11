@@ -1,4 +1,6 @@
-//! Implementes an unbuffered Stream of elements.
+//! Implementes an stream of values with a fixed buffer size. By
+//! default, the buffer size is 1.
+
 #![allow(dead_code)]
 #![allow(unused_variable)]
 #![allow(unused_imports)]
@@ -16,27 +18,52 @@ pub fn seq<T: Send>() -> (Seq<T>, SeqProducer<T>) {
     (s, p)
 }
 
+pub type Next<T> = Option<(T, Seq<T>)>;
+
 pub struct Seq<T> {
     core: Arc<MutexCell<Core<T>>>,
 }
 
-impl<T: Send> Future<Option<(T, Seq<T>)>> for Seq<T> {
-    fn is_complete(&self) -> bool {
-        unimplemented!();
-    }
+impl<T: Send> Future<Next<T>> for Seq<T> {
+    fn receive<F: FnOnce(Next<T>) -> () + Send>(self, cb: F) {
+        let mut head;
 
-    fn receive<F: FnOnce(Option<(T, Seq<T>)>) -> ()>(self, cb: F) {
-        unimplemented!();
+        // Scope required for borrow checker
+        {
+            // Acquire the mutex
+            let mut l = self.core.lock();
+
+            // Try taking the head value
+            if let Some(h) = l.take_head() {
+                // If there is a value, save it for once the lock scope
+                // is escaped.
+                head = h;
+            } else {
+                // No head yet, indicate interest by registering the
+                // callback.
+                l.state = ConsumerCb(box cb);
+                return;
+            }
+        }
+
+        // The head of the Seq has been realized, invoke the callback
+        // with it.
+        match head {
+            More(v) => cb(Some((v, self))),
+            Done => cb(None),
+        }
     }
 }
 
-impl<T: Send> SyncFuture<Option<(T, Seq<T>)>> for Seq<T> {
-    fn take(self) -> Option<(T, Seq<T>)> {
+impl<T: Send> SyncFuture<Next<T>> for Seq<T> {
+    fn take(self) -> Next<T> {
         let mut head;
 
+        // Satisfy the borrow checker
         {
+            // Acquire the mutex
             let mut l = self.core.lock();
-            l.completion = Wait;
+            l.state = ConsumerWait;
 
             loop {
                 if let Some(h) = l.take_head() {
@@ -55,11 +82,17 @@ impl<T: Send> SyncFuture<Option<(T, Seq<T>)>> for Seq<T> {
     }
 
     /// Gets the value from the future if it has been completed.
-    fn try_take(self) -> Result<Option<(T, Seq<T>)>, Seq<T>> {
+    fn try_take(self) -> Result<Next<T>, Seq<T>> {
         unimplemented!()
     }
 }
 
+/// The producing half of Seq. Each item sent to Seq realizes the
+/// current head.
+///
+/// SeqProducer is also a stream of consumer state changes. This can be
+/// used by the producing code to watch whether or not the consumer has
+/// registered an interest for the next element of the Seq.
 pub struct SeqProducer<T> {
     core: Arc<MutexCell<Core<T>>>,
 }
@@ -68,7 +101,7 @@ impl<T: Send> SeqProducer<T> {
     pub fn send(self, val: T) {
         let mut l = self.core.lock();
 
-        if let Callback(cb) = l.take_callback() {
+        if let ConsumerCb(cb) = l.take_callback() {
             drop(l);
 
             // The rest of the stream
@@ -79,16 +112,71 @@ impl<T: Send> SeqProducer<T> {
 
         l.put(val);
 
-        if l.completion.is_wait() {
+        if l.state.is_consumer_wait() {
             l.condvar.signal();
         }
+    }
+}
+
+/// The possible states for a consumer to be in.
+#[deriving(Show, PartialEq, Eq)]
+pub enum ConsumerState {
+    /// The Seq can buffer another value, but the consumer has not
+    /// indicated any interest yet.
+    Ready,
+    /// The consumer has expressed interest in the next value.
+    Waiting,
+    /// The stream cannot currently accept any further values.
+    Full,
+}
+
+pub type NextConsumerState<T> = Option<(ConsumerState, SeqProducer<T>)>;
+
+impl<T: Send> Future<NextConsumerState<T>> for SeqProducer<T> {
+    fn receive<F: FnOnce(NextConsumerState<T>) -> () + Send>(self, cb: F) {
+        let mut curr;
+
+        {
+            let mut l = self.core.lock();
+
+            // Get the current consumer state
+            curr = Some(l.consumer_state());
+
+            // If the state is identical to the last observed state,
+            // then it is not interesting. Save off the callback for
+            // later invocation.
+            if curr == l.last_observed {
+                l.state = ProducerCb(box cb);
+                return;
+            }
+
+            // The state has changed since last observation, record the
+            // new one.
+            l.last_observed = curr;
+        }
+
+        // Invoke the callback with the new state
+        cb(Some((curr.unwrap(), self)));
+    }
+}
+
+impl<T: Send> SyncFuture<NextConsumerState<T>> for SeqProducer<T> {
+    fn take(self) -> NextConsumerState<T> {
+        unimplemented!();
+    }
+
+    fn try_take(self) -> Result<NextConsumerState<T>, SeqProducer<T>> {
+        unimplemented!()
     }
 }
 
 struct Core<T> {
     head: Option<Head<T>>,
     condvar: CondVar,
-    completion: Completion<T>,
+    state: State<T>,
+    // The last consumer state observed by the producer is tracked in
+    // order to maintain the necessary semantics.
+    last_observed: Option<ConsumerState>,
 }
 
 impl<T: Send> Core<T> {
@@ -96,7 +184,8 @@ impl<T: Send> Core<T> {
         Core {
             head: None,
             condvar: CondVar::new(),
-            completion: Pending,
+            state: Pending,
+            last_observed: None,
         }
     }
 
@@ -109,11 +198,25 @@ impl<T: Send> Core<T> {
         mem::replace(&mut self.head, None)
     }
 
-    fn take_callback(&mut self) -> Completion<T> {
-        if self.completion.is_callback() {
-            mem::replace(&mut self.completion, Pending)
+    fn take_callback(&mut self) -> State<T> {
+        if self.state.is_callback() {
+            mem::replace(&mut self.state, Pending)
         } else {
             Pending
+        }
+    }
+
+    fn consumer_state(&self) -> ConsumerState {
+        match self.state {
+            Pending => Ready,
+            ConsumerWait | ConsumerCb(..) => Waiting,
+            ProducerWait | ProducerCb(..) => {
+                if self.head.is_some() {
+                    Full
+                } else {
+                    Ready
+                }
+            }
         }
     }
 }
@@ -123,13 +226,15 @@ enum Head<T> {
     Done,
 }
 
-enum Completion<T> {
+enum State<T> {
     Pending,
-    Wait,
-    Callback(Box<FnOnce<(Option<(T, Seq<T>)>,), ()> + Send>),
+    ConsumerWait,
+    ProducerWait,
+    ConsumerCb(Box<FnOnce<(Next<T>,), ()> + Send>),
+    ProducerCb(Box<FnOnce<(NextConsumerState<T>,), ()> + Send>),
 }
 
-impl<T: Send> Completion<T> {
+impl<T: Send> State<T> {
     fn is_pending(&self) -> bool {
         match *self {
             Pending => true,
@@ -137,16 +242,16 @@ impl<T: Send> Completion<T> {
         }
     }
 
-    fn is_wait(&self) -> bool {
+    fn is_consumer_wait(&self) -> bool {
         match *self {
-            Wait => true,
+            ConsumerWait => true,
             _ => false,
         }
     }
 
     fn is_callback(&self) -> bool {
         match *self {
-            Callback(..) => true,
+            ConsumerCb(..) => true,
             _ => false,
         }
     }

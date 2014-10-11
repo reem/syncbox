@@ -21,12 +21,14 @@ pub struct FutureVal<T> {
     core: Arc<MutexCell<Core<T>>>,
 }
 
-impl<T: Send> Future<T> for FutureVal<T> {
-    fn is_complete(&self) -> bool {
+impl<T: Send> FutureVal<T> {
+    pub fn is_complete(&self) -> bool {
         let mut l = self.core.lock();
         !l.completion.is_pending()
     }
+}
 
+impl<T: Send> Future<T> for FutureVal<T> {
     fn receive<F: FnOnce(T) -> () + Send>(self, cb: F) {
         let mut l = self.core.lock();
 
@@ -115,6 +117,11 @@ impl<T: Send> Completer<T> {
             l.condvar.signal();
         }
     }
+
+    fn is_complete(&self) -> bool {
+        let mut l = self.core.lock();
+        !l.completion.is_pending()
+    }
 }
 
 /*
@@ -124,11 +131,6 @@ impl<T: Send> Completer<T> {
  */
 
 impl<T: Send> Future<Completer<T>> for Completer<T> {
-    fn is_complete(&self) -> bool {
-        let mut l = self.core.lock();
-        !l.completion.is_pending()
-    }
-
     fn receive<F: FnOnce(Completer<T>) -> () + Send>(self, cb: F) {
         {
             let mut l = self.core.lock();
