@@ -26,6 +26,18 @@ impl<T: Send> FutureVal<T> {
         let mut l = self.core.lock();
         !l.completion.is_pending()
     }
+
+    pub fn try_take(self) -> Result<T, FutureVal<T>> {
+        {
+            let mut l = self.core.lock();
+
+            if let Some(v) = l.take_val() {
+                return Ok(v);
+            }
+        }
+
+        Err(self)
+    }
 }
 
 impl<T: Send> Future<T> for FutureVal<T> {
@@ -76,18 +88,6 @@ impl<T: Send> SyncFuture<T> for FutureVal<T> {
             l.wait(&l.condvar);
         }
     }
-
-    fn try_take(self) -> Result<T, FutureVal<T>> {
-        {
-            let mut l = self.core.lock();
-
-            if let Some(v) = l.take_val() {
-                return Ok(v);
-            }
-        }
-
-        Err(self)
-    }
 }
 
 impl<T: fmt::Show> fmt::Show for FutureVal<T> {
@@ -115,6 +115,14 @@ impl<T: Send> Completer<T> {
 
         if l.completion.is_consumer_wait() {
             l.condvar.signal();
+        }
+    }
+
+    pub fn try_take(self) -> Result<Completer<T>, Completer<T>> {
+        if self.is_complete() {
+            Ok(self)
+        } else {
+            Err(self)
         }
     }
 
@@ -167,15 +175,6 @@ impl<T: Send> SyncFuture<Completer<T>> for Completer<T> {
         }
 
         self
-    }
-
-    /// Gets the value from the future if it has been completed.
-    fn try_take(self) -> Result<Completer<T>, Completer<T>> {
-        if self.is_complete() {
-            Ok(self)
-        } else {
-            Err(self)
-        }
     }
 }
 
@@ -471,5 +470,41 @@ mod test {
 
         f.receive(move |:v| tx.send(v));
         assert_eq!(rx.recv(), "zomg");
+    }
+
+    #[test]
+    #[ignore]
+    pub fn test_completer_receive_when_consumer_cb_set() {
+        let (f, c) = future();
+        let (tx, rx) = channel::<&'static str>();
+
+        fn waiting(count: uint, c: Completer<&'static str>) {
+            println!("WAITING {}", count);
+            if count == 5 {
+                c.complete("done");
+            } else {
+                c.receive(move |:c| waiting(count + 1, c));
+            }
+        }
+
+        waiting(0, c);
+
+        f.receive(move |:v| tx.send(v));
+        assert_eq!(rx.recv(), "done");
+    }
+
+    #[test]
+    pub fn test_completer_take_when_consumer_cb_set() {
+        assert!(true);
+    }
+
+    #[test]
+    pub fn test_completer_receive_when_consumer_waiting() {
+        assert!(true);
+    }
+
+    #[test]
+    pub fn test_completer_take_when_consumer_waiting() {
+        assert!(true);
     }
 }

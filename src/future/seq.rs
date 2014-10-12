@@ -33,6 +33,21 @@ impl<T: Send> Future<Next<T>> for Seq<T> {
             // Acquire the mutex
             let mut l = self.core.lock();
 
+            // The interaction with a waiting producer depends on the
+            // current state of the stream: whether there currently is a
+            // value or not.
+            //
+            // A value is present:
+            //
+            //   The stream is currently full, the value is consumed
+            //   before notifying the producer of a state change.
+            //
+            // No value is present:
+            //
+            //   The stream is "Ready" (can buffer a value). Register
+            //   the consumer callback then notify the producer of the
+            //   state change.
+
             // Try taking the head value
             if let Some(h) = l.take_head() {
                 // If there is a value, save it for once the lock scope
@@ -170,13 +185,16 @@ impl<T: Send> SyncFuture<NextConsumerState<T>> for SeqProducer<T> {
     }
 }
 
+// Seq state shared between consumer and producer; guarded by a mutex.
+// This is implemented with a mutex & condvar fo rnow, but hopefully
+// Rust will add support for thread park / unpark.
 struct Core<T> {
     head: Option<Head<T>>,
     condvar: CondVar,
     state: State<T>,
     // The last consumer state observed by the producer is tracked in
     // order to maintain the necessary semantics.
-    last_observed: Option<ConsumerState>,
+    last_observed: ConsumerState,
 }
 
 impl<T: Send> Core<T> {
@@ -185,7 +203,7 @@ impl<T: Send> Core<T> {
             head: None,
             condvar: CondVar::new(),
             state: Pending,
-            last_observed: None,
+            last_observed: Full,
         }
     }
 
@@ -278,5 +296,19 @@ mod test {
         } else {
             fail!("nope");
         }
+    }
+
+    #[test]
+    pub fn test_producer_receive_when_consumer_cb_set() {
+        // The consumer is waiting for a value, the producer is
+        // notified, but instead of producing a value, the producer
+        // waits for another state change.
+        assert!(true);
+    }
+
+    #[test]
+    pub fn test_producer_take_when_consumer_cb_set() {
+        // Same as above, but with take instead of receive
+        assert!(true);
     }
 }
