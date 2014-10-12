@@ -11,8 +11,8 @@ use super::{Future, SyncFuture};
 pub fn future<T: Send>() -> (FutureVal<T>, Completer<T>) {
     let core = Arc::new(MutexCell::new(Core::new()));
 
-    let f = FutureVal { core: core.clone() };
-    let c = Completer { core: core };
+    let f = FutureVal::new(core.clone());
+    let c = Completer::new(core);
 
     (f, c)
 }
@@ -22,6 +22,12 @@ pub struct FutureVal<T> {
 }
 
 impl<T: Send> FutureVal<T> {
+
+    // Initializes a new FutureVal with the given core
+    fn new(core: Arc<MutexCell<Core<T>>>) -> FutureVal<T> {
+        FutureVal { core: core }
+    }
+
     pub fn is_complete(&self) -> bool {
         let mut l = self.core.lock();
         !l.completion.is_pending()
@@ -44,13 +50,14 @@ impl<T: Send> Future<T> for FutureVal<T> {
     fn receive<F: FnOnce(T) -> () + Send>(self, cb: F) {
         let mut l = self.core.lock();
 
-        if let CompleterCb(cb) = l.take_completer_cb() {
-            drop(l);
-            cb.call_once((Completer { core: self.core.clone() },));
-            l = self.core.lock();
-        } else {
-            if l.completion.is_completer_wait() {
-                l.condvar.signal();
+        if let CompleterWait(strategy) = l.take_completer_wait() {
+            match strategy {
+                Callback(cb) => {
+                    drop(l);
+                    cb.call_once((Completer::new(self.core.clone()),));
+                    l = self.core.lock();
+                }
+                Sync => l.condvar.signal(),
             }
         }
 
@@ -60,7 +67,7 @@ impl<T: Send> Future<T> for FutureVal<T> {
             return;
         }
 
-        l.completion = ConsumerCb(box cb);
+        l.completion = ConsumerWait(Callback(box cb));
     }
 }
 
@@ -68,17 +75,18 @@ impl<T: Send> SyncFuture<T> for FutureVal<T> {
     fn take(self) -> T {
         let mut l = self.core.lock();
 
-        if let CompleterCb(cb) = l.take_completer_cb() {
-            drop(l);
-            cb.call_once((Completer { core: self.core.clone() },));
-            l = self.core.lock();
-        } else {
-            if l.completion.is_completer_wait() {
-                l.condvar.signal();
+        if let CompleterWait(strategy) = l.take_completer_wait() {
+            match strategy {
+                Callback(cb) => {
+                    drop(l);
+                    cb.call_once((Completer::new(self.core.clone()),));
+                    l = self.core.lock();
+                }
+                Sync => l.condvar.signal(),
             }
         }
 
-        l.completion = ConsumerWait;
+        l.completion = ConsumerWait(Sync);
 
         loop {
             if let Some(v) = l.take_val() {
@@ -102,19 +110,29 @@ pub struct Completer<T> {
 }
 
 impl<T: Send> Completer<T> {
+
+    // Initializes a new Completer with the given core
+    fn new(core: Arc<MutexCell<Core<T>>>) -> Completer<T> {
+        Completer { core: core }
+    }
+
     pub fn complete(self, val: T) {
         let mut l = self.core.lock();
 
-        if let ConsumerCb(cb) = l.take_consumer_cb() {
-            drop(l);
-            cb.call_once((val,));
-            return;
-        }
-
-        l.put(val);
-
-        if l.completion.is_consumer_wait() {
-            l.condvar.signal();
+        if let ConsumerWait(strategy) = l.take_consumer_wait() {
+            match strategy {
+                Callback(cb) => {
+                    drop(l);
+                    cb.call_once((val,));
+                    return;
+                }
+                Sync => {
+                    l.put(val);
+                    l.condvar.signal();
+                }
+            }
+        } else {
+            l.put(val);
         }
     }
 
@@ -144,7 +162,7 @@ impl<T: Send> Future<Completer<T>> for Completer<T> {
             let mut l = self.core.lock();
 
             if l.completion.is_pending() {
-                l.completion = CompleterCb(box cb);
+                l.completion = CompleterWait(Callback(box cb));
                 return;
             }
 
@@ -162,7 +180,7 @@ impl<T: Send> SyncFuture<Completer<T>> for Completer<T> {
             let mut l = self.core.lock();
 
             if l.completion.is_pending() {
-                l.completion = CompleterWait;
+                l.completion = CompleterWait(Sync);
 
                 loop {
                     l.wait(&l.condvar);
@@ -202,16 +220,16 @@ impl<T: Send> Core<T> {
         mem::replace(&mut self.val, None)
     }
 
-    fn take_consumer_cb(&mut self) -> Completion<T> {
-        if self.completion.is_consumer_cb() {
+    fn take_consumer_wait(&mut self) -> Completion<T> {
+        if self.completion.is_consumer_wait() {
             mem::replace(&mut self.completion, Pending)
         } else {
             Pending
         }
     }
 
-    fn take_completer_cb(&mut self) -> Completion<T> {
-        if self.completion.is_completer_cb() {
+    fn take_completer_wait(&mut self) -> Completion<T> {
+        if self.completion.is_completer_wait() {
             mem::replace(&mut self.completion, Pending)
         } else {
             Pending
@@ -219,12 +237,11 @@ impl<T: Send> Core<T> {
     }
 }
 
+// TODO: Rename -> State
 enum Completion<T> {
     Pending,
-    ConsumerWait,
-    CompleterWait,
-    ConsumerCb(Box<FnOnce<(T,),()> + Send>),
-    CompleterCb(Box<FnOnce<(Completer<T>,),()> + Send>),
+    ConsumerWait(WaitStrategy<T>),
+    CompleterWait(WaitStrategy<Completer<T>>),
 }
 
 impl<T: Send> Completion<T> {
@@ -237,31 +254,22 @@ impl<T: Send> Completion<T> {
 
     fn is_consumer_wait(&self) -> bool {
         match *self {
-            ConsumerWait => true,
+            ConsumerWait(..) => true,
             _ => false,
         }
     }
 
     fn is_completer_wait(&self) -> bool {
         match *self {
-            CompleterWait => true,
+            CompleterWait(..) => true,
             _ => false,
         }
     }
+}
 
-    fn is_consumer_cb(&self) -> bool {
-        match *self {
-            ConsumerCb(..) => true,
-            _ => false,
-        }
-    }
-
-    fn is_completer_cb(&self) -> bool {
-        match *self {
-            CompleterCb(..) => true,
-            _ => false,
-        }
-    }
+enum WaitStrategy<T> {
+    Callback(Box<FnOnce<(T,), ()> + Send>),
+    Sync,
 }
 
 #[cfg(test)]
