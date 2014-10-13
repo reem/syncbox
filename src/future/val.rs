@@ -5,96 +5,49 @@
 //! re-implemented using lock free strategies once the API stabalizes.
 
 use std::{fmt, mem};
-use sync::{Arc, MutexCell, CondVar};
+use sync::{Arc, MutexCell, MutexCellGuard, CondVar};
 use super::{Future, SyncFuture};
 
-pub fn future<T: Send>() -> (FutureVal<T>, Completer<T>) {
-    let core = Arc::new(MutexCell::new(Core::new()));
+// TODO:
+// * Consider renaming Completer -> ValProducer
 
-    let f = FutureVal::new(core.clone());
-    let c = Completer::new(core);
+pub fn future<T: Send>() -> (FutureVal<T>, Completer<T>) {
+    let inner = FutureImpl::new();
+
+    let f = FutureVal::new(inner.clone());
+    let c = Completer::new(inner);
 
     (f, c)
 }
 
 pub struct FutureVal<T> {
-    core: Arc<MutexCell<Core<T>>>,
+    inner: FutureImpl<T>,
 }
 
 impl<T: Send> FutureVal<T> {
-
-    // Initializes a new FutureVal with the given core
-    fn new(core: Arc<MutexCell<Core<T>>>) -> FutureVal<T> {
-        FutureVal { core: core }
-    }
-
-    pub fn is_complete(&self) -> bool {
-        let mut l = self.core.lock();
-        !l.completion.is_pending()
-    }
-
-    pub fn try_take(self) -> Result<T, FutureVal<T>> {
-        {
-            let mut l = self.core.lock();
-
-            if let Some(v) = l.take_val() {
-                return Ok(v);
-            }
-        }
-
-        Err(self)
+    /// Creates a new FutureVal with the given core
+    #[inline]
+    fn new(inner: FutureImpl<T>) -> FutureVal<T> {
+        FutureVal { inner: inner }
     }
 }
 
 impl<T: Send> Future<T> for FutureVal<T> {
-    fn receive<F: FnOnce(T) -> () + Send>(self, cb: F) {
-        let mut l = self.core.lock();
+    #[inline]
+    fn receive<F: FnOnce(T) + Send>(self, cb: F) {
+        self.inner.receive(cb);
+    }
 
-        if let CompleterWait(strategy) = l.take_completer_wait() {
-            match strategy {
-                Callback(cb) => {
-                    drop(l);
-                    cb.call_once((Completer::new(self.core.clone()),));
-                    l = self.core.lock();
-                }
-                Sync => l.condvar.signal(),
-            }
-        }
-
-        if let Some(v) = l.take_val() {
-            drop(l); // Escape the mutex
-            cb(v);
-            return;
-        }
-
-        l.completion = ConsumerWait(Callback(box cb));
+    #[inline]
+    fn cancel(self) {
+        self.inner.cancel();
     }
 }
 
 impl<T: Send> SyncFuture<T> for FutureVal<T> {
+    #[inline]
     fn take(self) -> T {
-        let mut l = self.core.lock();
-
-        if let CompleterWait(strategy) = l.take_completer_wait() {
-            match strategy {
-                Callback(cb) => {
-                    drop(l);
-                    cb.call_once((Completer::new(self.core.clone()),));
-                    l = self.core.lock();
-                }
-                Sync => l.condvar.signal(),
-            }
-        }
-
-        l.completion = ConsumerWait(Sync);
-
-        loop {
-            if let Some(v) = l.take_val() {
-                return v;
-            }
-
-            l.wait(&l.condvar);
-        }
+        self.inner.take()
     }
 }
 
@@ -106,47 +59,24 @@ impl<T: fmt::Show> fmt::Show for FutureVal<T> {
 }
 
 pub struct Completer<T> {
-    core: Arc<MutexCell<Core<T>>>,
+    inner: FutureImpl<T>,
 }
 
 impl<T: Send> Completer<T> {
-
-    // Initializes a new Completer with the given core
-    fn new(core: Arc<MutexCell<Core<T>>>) -> Completer<T> {
-        Completer { core: core }
+    /// Creates a new Completer with the given core
+    #[inline]
+    fn new(inner: FutureImpl<T>) -> Completer<T> {
+        Completer { inner: inner }
     }
 
+    #[inline]
     pub fn complete(self, val: T) {
-        let mut l = self.core.lock();
-
-        if let ConsumerWait(strategy) = l.take_consumer_wait() {
-            match strategy {
-                Callback(cb) => {
-                    drop(l);
-                    cb.call_once((val,));
-                    return;
-                }
-                Sync => {
-                    l.put(val);
-                    l.condvar.signal();
-                }
-            }
-        } else {
-            l.put(val);
-        }
+        self.inner.complete(val);
     }
 
-    pub fn try_take(self) -> Result<Completer<T>, Completer<T>> {
-        if self.is_complete() {
-            Ok(self)
-        } else {
-            Err(self)
-        }
-    }
-
-    fn is_complete(&self) -> bool {
-        let mut l = self.core.lock();
-        !l.completion.is_pending()
+    #[inline]
+    pub fn fail(self, desc: &'static str) {
+        self.inner.fail(desc);
     }
 }
 
@@ -157,42 +87,218 @@ impl<T: Send> Completer<T> {
  */
 
 impl<T: Send> Future<Completer<T>> for Completer<T> {
-    fn receive<F: FnOnce(Completer<T>) -> () + Send>(self, cb: F) {
-        {
-            let mut l = self.core.lock();
+    #[inline]
+    fn receive<F: FnOnce(Completer<T>) + Send>(self, cb: F) {
+        self.inner.completer_receive(cb);
+    }
 
-            if l.completion.is_pending() {
-                l.completion = CompleterWait(Callback(box cb));
-                return;
-            }
-
-            drop(l);
-        }
-
-        // The consumer is currently waiting, invoke the callback
-        cb(self);
+    #[inline]
+    fn cancel(self) {
+        self.fail("canceled by producer");
     }
 }
 
 impl<T: Send> SyncFuture<Completer<T>> for Completer<T> {
     fn take(self) -> Completer<T> {
+        self.inner.completer_take()
+    }
+}
+
+/*
+ *
+ * ===== Implementation details =====
+ *
+ */
+
+struct FutureImpl<T> {
+    core: Arc<MutexCell<Core<T>>>,
+}
+
+impl<T: Send> FutureImpl<T> {
+    fn new() -> FutureImpl<T> {
+        FutureImpl {
+            core: Arc::new(MutexCell::new(Core::new()))
+        }
+    }
+
+    fn receive<F: FnOnce(T) + Send>(self, cb: F) {
+        // Acquire the lock
+        let mut core = self.lock();
+
+        // If the producer is currently waiting, notify it that the
+        // consumer has indicated interest in the result.
+        core = self.notify_completer(core);
+
+        // If the future has already been realized, move the value out
+        // of the core so that it can be sent to the supplied callback.
+        if let Some(val) = core.take_value() {
+            // Drop the lock before invoking the callback (prevent
+            // deadlocks).
+            drop(core);
+            cb(val);
+            return;
+        }
+
+        // The future's value has not yet been realized. Save off the
+        // callback and mark the consumer as waiting for the value. When
+        // the value is available, the calback will be invoked with it.
+        core.completion = ConsumerWait(Callback(box cb));
+    }
+
+    fn take(self) -> T {
+        // Acquire the lock
+        let mut core = self.lock();
+
+        // If the producer is currently waiting, notify it that the
+        // consumer has indicated interest in the result.
+        core = self.notify_completer(core);
+
+        // Before the thread blocks, track that the consumer is waiting
+        core.completion = ConsumerWait(Sync);
+
+        // Checking the value and waiting happens in a loop to handle
+        // cases where the condition variable unblocks early for an
+        // unknown reason (permitted by the pthread spec).
+        loop {
+            // Check if the value has been realized before blocking
+            if let Some(val) = core.take_value() {
+                return val;
+            }
+
+            // Wait on the condition variable
+            core.wait(&core.condvar);
+        }
+    }
+
+    fn cancel(self) {
+        unimplemented!()
+    }
+
+    fn complete(self, val: T) {
+        // Acquire the lock
+        let mut core = self.lock();
+
+        // Check if the consumer is waiting on the value, if so, it will
+        // be notified that value is ready.
+        if let ConsumerWait(strategy) = core.take_consumer_wait() {
+            // Check the consumer wait strategy
+            match strategy {
+                // If the consumer is waiting with a callback, release
+                // the lock and invoke the callback with the value.
+                Callback(cb) => {
+                    drop(core);
+                    cb.call_once((val,));
+                }
+                // Otherwise, store the value on the future and signal
+                // the consumer that the value is ready.
+                Sync => {
+                    core.put(val);
+                    core.condvar.signal();
+                }
+            }
+
+            return;
+        }
+
+        core.put(val);
+    }
+
+    fn fail(self, desc: &'static str) {
+        unimplemented!()
+    }
+
+    fn completer_receive<F: FnOnce(Completer<T>) + Send>(self, cb: F) {
+        // Run the synchronized logic within a scope such that the lock
+        // is released at the end of the scope.
         {
-            let mut l = self.core.lock();
+            // Acquire the lock
+            let mut core = self.lock();
 
-            if l.completion.is_pending() {
-                l.completion = CompleterWait(Sync);
+            // If the consumer has not registered an interest yet, save off
+            // the callback for when it does and return;
+            if core.completion.is_pending() {
+                core.completion = CompleterWait(Callback(box cb));
+                return;
+            }
 
+            // The consumer has registered an interest in the value. Release
+            // the lock then invoke the callback. This allows the callback
+            // to run outside of the lock preventing deadlocks.
+            drop(core);
+        }
+
+        // Invoke the callback with the completer (simply wrap the
+        // FutureImpl instance)
+        cb(Completer::new(self));
+    }
+
+    fn completer_take(self) -> Completer<T> {
+        // Run the synchronized logic within a scope such that the lock
+        // is released at the end of the scope.
+        {
+            // Acquire the lock
+            let mut core = self.lock();
+
+            // If the consumer has not registered an interest yet, track
+            // that the completer is about to block, then wait for the
+            // signal.
+            if core.completion.is_pending() {
+                core.completion = CompleterWait(Sync);
+
+                // Loop as long as the future remains in the completer wait
+                // state.
                 loop {
-                    l.wait(&l.condvar);
+                    // Wait on the cond var
+                    core.wait(&core.condvar);
 
-                    if !l.completion.is_completer_wait() {
+                    // If the future state has changed, break out fo the
+                    // loop.
+                    if !core.completion.is_completer_wait() {
                         break;
                     }
                 }
             }
         }
 
-        self
+        // Return the completer (simply wrap the FutureImpl instance)
+        Completer::new(self)
+    }
+
+    fn notify_completer<'a>(&'a self, mut core: LockedCore<'a, T>)
+            -> LockedCore<'a, T> {
+
+        // Run notification in a loop, the callback has the option to
+        // re-register another receive callback, in which case it should
+        // be immediately invoked.
+        loop {
+            if let CompleterWait(strategy) = core.take_completer_wait() {
+                match strategy {
+                    Callback(cb) => {
+                        drop(core);
+
+                        cb.call_once((Completer::new(self.clone()),));
+
+                        core = self.lock();
+                    }
+                    Sync => core.condvar.signal(),
+                }
+            } else {
+                break;
+            }
+        }
+
+        core
+    }
+
+    #[inline]
+    fn lock(&self) -> MutexCellGuard<Core<T>> {
+        self.core.lock()
+    }
+}
+
+impl<T: Send> Clone for FutureImpl<T> {
+    fn clone(&self) -> FutureImpl<T> {
+        FutureImpl { core: self.core.clone() }
     }
 }
 
@@ -201,6 +307,8 @@ struct Core<T> {
     condvar: CondVar,
     completion: Completion<T>,
 }
+
+type LockedCore<'a, T> = MutexCellGuard<'a, Core<T>>;
 
 impl<T: Send> Core<T> {
     fn new() -> Core<T> {
@@ -216,7 +324,7 @@ impl<T: Send> Core<T> {
         self.val = Some(val);
     }
 
-    fn take_val(&mut self) -> Option<T> {
+    fn take_value(&mut self) -> Option<T> {
         mem::replace(&mut self.val, None)
     }
 
@@ -277,7 +385,7 @@ mod test {
     use std::io::timer::sleep;
     use std::time::Duration;
     use sync::Arc;
-    use sync::atomic::{AtomicBool, Relaxed};
+    use sync::atomic::{AtomicBool, AtomicUint, Relaxed};
     use future::{Future, SyncFuture};
     use super::*;
 
@@ -303,19 +411,6 @@ mod test {
         });
 
         assert_eq!(f.take(), "zomg");
-    }
-
-    #[test]
-    pub fn test_try_take_no_val() {
-        let (f, _) = future::<uint>();
-        assert!(f.try_take().is_err());
-    }
-
-    #[test]
-    pub fn test_try_take_val() {
-        let (f, c) = future();
-        c.complete("hello");
-        assert_eq!(f.try_take().unwrap(), "hello");
     }
 
     #[test]
@@ -480,39 +575,67 @@ mod test {
         assert_eq!(rx.recv(), "zomg");
     }
 
+    // Utility method used below
+    fn waiting(count: uint, d: Arc<AtomicUint>, c: Completer<&'static str>) {
+        // Assert that the callback is not invoked recursively
+        assert_eq!(0, d.fetch_add(1, Relaxed));
+
+        if count == 5 {
+            c.complete("done");
+        } else {
+            let d2 = d.clone();
+            c.receive(move |:c| waiting(count + 1, d2, c));
+        }
+
+        d.fetch_sub(1, Relaxed);
+    }
+
     #[test]
-    #[ignore]
     pub fn test_completer_receive_when_consumer_cb_set() {
         let (f, c) = future();
         let (tx, rx) = channel::<&'static str>();
+        let depth = Arc::new(AtomicUint::new(0));
 
-        fn waiting(count: uint, c: Completer<&'static str>) {
-            println!("WAITING {}", count);
-            if count == 5 {
-                c.complete("done");
-            } else {
-                c.receive(move |:c| waiting(count + 1, c));
-            }
-        }
-
-        waiting(0, c);
+        waiting(0, depth, c);
 
         f.receive(move |:v| tx.send(v));
         assert_eq!(rx.recv(), "done");
     }
 
     #[test]
-    pub fn test_completer_take_when_consumer_cb_set() {
-        assert!(true);
+    pub fn test_completer_receive_when_consumer_waiting() {
+        let (f, c) = future();
+        let depth = Arc::new(AtomicUint::new(0));
+
+        waiting(0, depth, c);
+
+        sleep(Duration::milliseconds(50));
+        assert_eq!(f.take(), "done");
     }
 
     #[test]
-    pub fn test_completer_receive_when_consumer_waiting() {
-        assert!(true);
+    pub fn test_completer_take_when_consumer_cb_set() {
+        let (f, c) = future();
+        let (tx, rx) = channel::<&'static str>();
+
+        spawn(proc() {
+            c.take().take().take().complete("zomg");
+        });
+
+        sleep(Duration::milliseconds(50));
+        f.receive(move |:v| tx.send(v));
+        assert_eq!(rx.recv(), "zomg");
     }
 
     #[test]
     pub fn test_completer_take_when_consumer_waiting() {
-        assert!(true);
+        let (f, c) = future();
+
+        spawn(proc() {
+            c.take().take().take().complete("zomg");
+        });
+
+        sleep(Duration::milliseconds(50));
+        assert_eq!(f.take(), "zomg");
     }
 }
