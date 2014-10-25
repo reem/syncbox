@@ -48,11 +48,10 @@ impl<T: Send> FutureVal<T> {
     }
 }
 
-impl<T: Send> Future<T, Interest> for FutureVal<T> {
+impl<T: Send> Future<T> for FutureVal<T> {
     #[inline]
-    fn receive<F: FnOnce(FutureResult<T>) + Send>(mut self, cb: F) -> Interest {
+    fn receive<F: FnOnce(FutureResult<T>) + Send>(mut self, cb: F) {
         self.inner.take().unwrap().receive(cb);
-        Interest
     }
 }
 
@@ -166,12 +165,11 @@ impl<T: Send> Drop for Producer<T> {
  *
  */
 
-impl<T: Send> Future<Producer<T>, ProducerInterest> for Producer<T> {
+impl<T: Send> Future<Producer<T>> for Producer<T> {
     #[inline]
-    fn receive<F: FnOnce(FutureResult<Producer<T>>) + Send>(mut self, cb: F) -> ProducerInterest {
+    fn receive<F: FnOnce(FutureResult<Producer<T>>) + Send>(mut self, cb: F) {
         let inner = self.inner.take().unwrap();
         inner.producer_receive(cb);
-        ProducerInterest
     }
 }
 
@@ -190,14 +188,6 @@ impl<T: Send> Cancel for Producer<T> {
     #[inline]
     fn cancel(self) {
         self.fail("canceled by producer");
-    }
-}
-
-pub struct ProducerInterest;
-
-impl Cancel for ProducerInterest {
-    fn cancel(self) {
-        unimplemented!()
     }
 }
 

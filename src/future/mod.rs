@@ -8,10 +8,15 @@ pub use self::future::{
     ExecutionError,
     CancelationError,
 };
+pub use self::join::{
+    join,
+    join_all,
+};
 pub use self::val::{
     FutureVal,
-    future
+    future,
 };
 
 mod future;
+mod join;
 pub mod val;
