@@ -3,13 +3,14 @@ use std::{mem, ptr, ops, usize};
 use std::sync::{Arc, Mutex, MutexGuard, Condvar};
 use std::sync::atomic::{self, AtomicUsize, Ordering};
 use std::time::Duration;
+use std::ptr::Unique;
 
 /// A queue in which values are contained by a linked list.
 ///
 /// The current implementation is based on a mutex and two condition variables.
 /// It is also mostly a placeholder until a lock-free version is implemented,
 /// so it has not been tuned for performance.
-pub struct LinkedQueue<T> {
+pub struct LinkedQueue<T: Send> {
     inner: Arc<QueueInner<T>>,
 }
 
@@ -112,7 +113,7 @@ impl<T: Send> Clone for LinkedQueue<T> {
 //  be of the kind understood by the GC.  We use the trick of
 //  linking a Node that has just been dequeued to itself.  Such a
 //  self-link implicitly means to advance to head.next.
-struct QueueInner<T> {
+struct QueueInner<T: Send> {
 
     // Maximum number of elements the queue can contain at one time
     capacity: usize,
@@ -305,22 +306,22 @@ impl<T: Send> Node<T> {
     }
 }
 
-struct NodePtr<T> {
-    ptr: *mut Node<T>,
+struct NodePtr<T: Send> {
+    ptr: Unique<Node<T>>,
 }
 
 impl<T: Send> NodePtr<T> {
     fn new(node: Node<T>) -> NodePtr<T> {
-        NodePtr { ptr: unsafe { mem::transmute(Box::new(node)) }}
+        NodePtr { ptr: unsafe { Unique::new(mem::transmute(Box::new(node))) }}
     }
 
     fn null() -> NodePtr<T> {
-        NodePtr { ptr: ptr::null_mut() }
+        NodePtr { ptr: unsafe { Unique::new(ptr::null_mut()) } }
     }
 
     fn free(self) {
         let NodePtr { ptr } = self;
-        let _: Box<Node<T>> = unsafe { mem::transmute(ptr) };
+        let _: Box<Node<T>> = unsafe { Unique::new(mem::transmute(ptr)) };
     }
 }
 
@@ -328,17 +329,17 @@ impl<T: Send> ops::Deref for NodePtr<T> {
     type Target = Node<T>;
 
     fn deref(&self) -> &Node<T> {
-        unsafe { mem::transmute(self.ptr) }
+        unsafe { mem::transmute(self.ptr.0) }
     }
 }
 
 impl<T: Send> ops::DerefMut for NodePtr<T> {
     fn deref_mut(&mut self) -> &mut Node<T> {
-        unsafe { mem::transmute(self.ptr) }
+        unsafe { mem::transmute(self.ptr.0) }
     }
 }
 
-impl<T: Send> Copy for NodePtr<T> {}
+// impl<T: Send> Copy for NodePtr<T> {}
 unsafe impl<T: Send> Send for NodePtr<T> {}
 
 #[cfg(test)]

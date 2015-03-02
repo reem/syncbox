@@ -66,7 +66,7 @@ impl<T: Send, E: Send> Core<T, E> {
 
     /// Registers a callback that will be invoked when calling `consumer_poll`
     /// will return a value.
-    pub fn consumer_ready<F: FnOnce(Core<T, E>) + Send>(&self, f: F) -> Option<u64> {
+    pub fn consumer_ready<F: FnOnce(Core<T, E>) + Send + 'static>(&self, f: F) -> Option<u64> {
         self.inner().consumer_ready(f)
     }
 
@@ -103,7 +103,7 @@ impl<T: Send, E: Send> Core<T, E> {
         }
     }
 
-    pub fn producer_ready<F: FnOnce(Core<T, E>) + Send>(&self, f: F) {
+    pub fn producer_ready<F: FnOnce(Core<T, E>) + Send + 'static>(&self, f: F) {
         self.inner().producer_ready(f);
     }
 
@@ -249,7 +249,7 @@ impl<T: Send, E: Send> CoreInner<T, E> {
         Some(self.consume_val(curr))
     }
 
-    fn consumer_ready<F: FnOnce(Core<T, E>) + Send>(&self, f: F) -> Option<u64> {
+    fn consumer_ready<F: FnOnce(Core<T, E>) + Send + 'static>(&self, f: F) -> Option<u64> {
         let mut curr = self.state.load(Relaxed);
 
         debug!("Core::consumer_ready; state={:?}", curr);
@@ -450,7 +450,7 @@ impl<T: Send, E: Send> CoreInner<T, E> {
         Some(Ok(self.core()))
     }
 
-    fn producer_ready<F: FnOnce(Core<T, E>) + Send>(&self, f: F) {
+    fn producer_ready<F: FnOnce(Core<T, E>) + Send + 'static>(&self, f: F) {
         let mut curr = self.state.load(Relaxed);
 
         debug!("Core::producer_ready; state={:?}", curr);

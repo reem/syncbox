@@ -108,9 +108,6 @@ struct ProgressInner<P: Partial<R>, R: Send, E: Send> {
     remaining: AtomicInt,
 }
 
-unsafe impl<P: Partial<R>, R: Send, E: Send> Sync for UnsafeCell<ProgressInner<P, R, E>> {
-}
-
 macro_rules! expr {
     ($e: expr) => { $e };
 }

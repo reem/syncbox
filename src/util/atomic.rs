@@ -38,6 +38,7 @@ pub trait Atomic<T> : Send + Sync {
 
 /// A value that can be stored in an atomic box
 pub trait ToAtomicRepr : Send {
+    type AtomicRepr: Atomic<Self::Repr>;
 
     /// The representation of the value when stored in an atomic box.
     type Repr;
@@ -50,21 +51,21 @@ pub trait ToAtomicRepr : Send {
 }
 
 // TODO: Move A -> ToAtomicRepr associated type (blocked rust-lang/rust#20772)
-pub struct AtomicVal<T: ToAtomicRepr, A: Atomic<T::Repr>> {
-    atomic: A,
+pub struct AtomicVal<T: ToAtomicRepr> {
+    atomic: T::AtomicRepr,
 }
 
-impl<T: ToAtomicRepr, A: Atomic<T::Repr>> AtomicVal<T, A> {
+impl<T: ToAtomicRepr> AtomicVal<T> {
     /// Returns a new atomic box
-    pub fn new(init: T) -> AtomicVal<T, A> {
-        AtomicVal { atomic: <A as Atomic<T::Repr>>::new(init.to_repr()) }
+    pub fn new(init: T) -> AtomicVal<T> {
+        AtomicVal { atomic: <T::AtomicRepr>::new(init.to_repr()) }
     }
 }
 
-impl<T: ToAtomicRepr, A: Atomic<T::Repr>> Atomic<T> for AtomicVal<T, A> {
+impl<T: ToAtomicRepr> Atomic<T> for AtomicVal<T> {
 
     /// Returns a new atomic box
-    fn new(init: T) -> AtomicVal<T, A> {
+    fn new(init: T) -> AtomicVal<T> {
         AtomicVal::new(init)
     }
 

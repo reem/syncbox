@@ -139,7 +139,7 @@ impl<T: Send, E: Send> Future<T, E> {
     }
 }
 
-impl<T: Send> Future<T, ()> {
+impl<T: Send + 'static> Future<T, ()> {
     /// Returns a `Future` representing the completion of the given closure.
     /// The closure will be executed on a newly spawned thread.
     ///
@@ -153,7 +153,7 @@ impl<T: Send> Future<T, ()> {
     ///
     /// assert_eq!(100, future.await().unwrap());
     pub fn spawn<F>(f: F) -> Future<T, ()>
-        where F: FnOnce() -> T + Send {
+        where F: FnOnce() -> T + Send + 'static {
 
         use std::thread::Thread;
         let (complete, future) = Future::pair();
