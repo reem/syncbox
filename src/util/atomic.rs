@@ -67,7 +67,7 @@ impl<T: ToAtomicRepr, A: Atomic<T::Repr>> AtomicVal<T, A> {
     }
 }
 
-impl<T: ToAtomicRepr, A: Atomic<T::Repr>> Atomic<T> for AtomicVal<T, A> {
+impl<T: ToAtomicRepr + Send + Sync, A: Atomic<T::Repr>> Atomic<T> for AtomicVal<T, A> {
 
     /// Returns a new atomic box
     fn new(init: T) -> AtomicVal<T, A> {
