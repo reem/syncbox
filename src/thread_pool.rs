@@ -4,6 +4,7 @@ use super::run::Run;
 use std::num::FromPrimitive;
 use std::sync::{Arc, Mutex, Condvar};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thunk::Thunk;
 use std::thread;
 
 use self::Lifecycle::*;
@@ -57,8 +58,8 @@ impl ThreadPool {
 }
 
 impl Run for ThreadPool {
-    fn run<F>(&self, task: F) where F: FnOnce() + Send + 'static {
-        ThreadPool::run(self, task);
+    fn run(&self, task: Thunk<'static>) {
+        ThreadPool::run(self, move || { task.invoke(()) })
     }
 }
 
