@@ -12,11 +12,11 @@ pub trait WorkQueue<T> : SyncQueue<Option<T>> + Clone + Send + 'static {
 impl<T, Q: SyncQueue<Option<T>> + Clone + Send + 'static> WorkQueue<T> for Q {
 }
 
-pub struct ThreadPool<T: Task+'static, Q: WorkQueue<T> = LinkedQueue<Option<T>>> {
+pub struct ThreadPool<T: Task + Send + 'static, Q: WorkQueue<T> = LinkedQueue<Option<T>>> {
     inner: Arc<ThreadPoolInner<T, Q>>,
 }
 
-impl<T: Task+'static> ThreadPool<T, LinkedQueue<Option<T>>> {
+impl<T: Task + Send + 'static> ThreadPool<T, LinkedQueue<Option<T>>> {
     pub fn fixed_size(size: u32) -> ThreadPool<T, LinkedQueue<Option<T>>> {
         ThreadPool::new(size, size, LinkedQueue::with_capacity(usize::MAX))
     }
@@ -26,7 +26,7 @@ impl<T: Task+'static> ThreadPool<T, LinkedQueue<Option<T>>> {
     }
 }
 
-impl<T: Task+'static, Q: WorkQueue<T>> ThreadPool<T, Q> {
+impl<T: Task + Send + 'static, Q: WorkQueue<T>> ThreadPool<T, Q> {
     pub fn new(core_pool_size: u32,
                maximum_pool_size: u32,
                work_queue: Q) -> ThreadPool<T, Q> {
@@ -64,13 +64,13 @@ impl<T: Task+'static, Q: WorkQueue<T>> ThreadPool<T, Q> {
     }
 }
 
-impl<T: Task+'static, Q: WorkQueue<T>> Run<T> for ThreadPool<T, Q> {
+impl<T: Task + Send + 'static, Q: WorkQueue<T>> Run<T> for ThreadPool<T, Q> {
     fn run(&self, task: T) {
         self.inner.run(task, true);
     }
 }
 
-impl<T: Task+'static, Q: WorkQueue<T>> Clone for ThreadPool<T, Q> {
+impl<T: Task + Send + 'static, Q: WorkQueue<T>> Clone for ThreadPool<T, Q> {
     fn clone(&self) -> ThreadPool<T, Q> {
         ThreadPool { inner: self.inner.clone() }
     }
@@ -97,7 +97,7 @@ impl ScheduledThreadPool {
         ScheduledThreadPool::fixed_size(1)
     }
 
-    pub fn schedule_ms<T: Task+'static>(&self, delay: u32, task: T) {
+    pub fn schedule_ms<T: Task + Send + 'static>(&self, delay: u32, task: T) {
         let delay = Duration::milliseconds(delay as i64);
         let task = Scheduled::Delayed(Box::new(task), delay);
 
@@ -105,7 +105,7 @@ impl ScheduledThreadPool {
     }
 }
 
-impl<T: Task+'static> Run<T> for ScheduledThreadPool {
+impl<T: Task + Send + 'static> Run<T> for ScheduledThreadPool {
     fn run(&self, task: T) {
         self.schedule_ms(0, task);
     }
@@ -118,7 +118,7 @@ impl Clone for ScheduledThreadPool {
 }
 
 enum Scheduled {
-    Delayed(Box<BoxedTask>, Duration),
+    Delayed(Box<BoxedTask + Send>, Duration),
 }
 
 impl Delayed for Scheduled {
@@ -158,7 +158,7 @@ impl<T: Task + 'static> BoxedTask for T {
 //
 // - Poison the thread pool if something goes critically wrong
 //
-struct ThreadPoolInner<T: Task+'static, Q: WorkQueue<T>> {
+struct ThreadPoolInner<T: Task + Send + 'static, Q: WorkQueue<T>> {
 
     // Contains the state, condvar, etc..
     core: Arc<Core>,
@@ -175,7 +175,7 @@ struct ThreadPoolInner<T: Task+'static, Q: WorkQueue<T>> {
     task: PhantomData<T>,
 }
 
-impl<T: Task+'static, Q: WorkQueue<T>> ThreadPoolInner<T, Q> {
+impl<T: Task + Send + 'static, Q: WorkQueue<T>> ThreadPoolInner<T, Q> {
 
     fn new(core_pool_size: u32,
            maximum_pool_size: u32,
@@ -405,17 +405,13 @@ impl<T: Task+'static, Q: WorkQueue<T>> ThreadPoolInner<T, Q> {
     }
 }
 
-impl<T: Task+'static, Q: WorkQueue<T>> Drop for ThreadPoolInner<T, Q> {
+impl<T: Task + Send + 'static, Q: WorkQueue<T>> Drop for ThreadPoolInner<T, Q> {
     fn drop(&mut self) {
         self.shutdown(Lifecycle::Stop);
     }
 }
 
-// Needed because of the PhantomData marker
-unsafe impl<T: Task+'static, Q: WorkQueue<T>> Send for ThreadPoolInner<T, Q> { }
-unsafe impl<T: Task+'static, Q: WorkQueue<T>> Sync for ThreadPoolInner<T, Q> { }
-
-struct Worker<T: Task+'static, Q: WorkQueue<T>> {
+struct Worker<T: Task + Send + 'static, Q: WorkQueue<T>> {
     // Core shared by ThreadPool and Worker
     core: Arc<Core>,
 
@@ -429,7 +425,7 @@ struct Worker<T: Task+'static, Q: WorkQueue<T>> {
     panicked: bool,
 }
 
-impl<T: Task+'static, Q: WorkQueue<T>> Worker<T, Q> {
+impl<T: Task + Send + 'static, Q: WorkQueue<T>> Worker<T, Q> {
     fn new(core: Arc<Core>, initial_task: Option<T>, queue: Q) -> Worker<T, Q> {
         Worker {
             core: core,
@@ -537,7 +533,7 @@ impl<T: Task+'static, Q: WorkQueue<T>> Worker<T, Q> {
     }
 }
 
-impl<T: Task+'static, Q: WorkQueue<T>> Drop for Worker<T, Q> {
+impl<T: Task + Send + 'static, Q: WorkQueue<T>> Drop for Worker<T, Q> {
     fn drop(&mut self) {
         if self.panicked {
             self.decrement_worker_count(true);

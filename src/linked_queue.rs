@@ -8,11 +8,11 @@ use std::sync::atomic::{self, AtomicUsize, Ordering};
 /// The current implementation is based on a mutex and two condition variables.
 /// It is also mostly a placeholder until a lock-free version is implemented,
 /// so it has not been tuned for performance.
-pub struct LinkedQueue<T: Send> {
+pub struct LinkedQueue<T> {
     inner: Arc<QueueInner<T>>,
 }
 
-impl<T: Send> LinkedQueue<T> {
+impl<T> LinkedQueue<T> {
     pub fn new() -> LinkedQueue<T> {
         LinkedQueue::with_capacity(usize::MAX)
     }
@@ -49,7 +49,7 @@ impl<T: Send> LinkedQueue<T> {
     }
 }
 
-impl<T: Send> Queue<T> for LinkedQueue<T> {
+impl<T> Queue<T> for LinkedQueue<T> {
     fn poll(&self) -> Option<T> {
         LinkedQueue::poll(self)
     }
@@ -63,7 +63,7 @@ impl<T: Send> Queue<T> for LinkedQueue<T> {
     }
 }
 
-impl<T: Send> SyncQueue<T> for LinkedQueue<T> {
+impl<T> SyncQueue<T> for LinkedQueue<T> {
     fn take(&self) -> T {
         LinkedQueue::take(self)
     }
@@ -73,7 +73,7 @@ impl<T: Send> SyncQueue<T> for LinkedQueue<T> {
     }
 }
 
-impl<T: Send> Clone for LinkedQueue<T> {
+impl<T> Clone for LinkedQueue<T> {
     fn clone(&self) -> LinkedQueue<T> {
         LinkedQueue { inner: self.inner.clone() }
     }
@@ -111,7 +111,7 @@ impl<T: Send> Clone for LinkedQueue<T> {
 //  be of the kind understood by the GC.  We use the trick of
 //  linking a Node that has just been dequeued to itself.  Such a
 //  self-link implicitly means to advance to head.next.
-struct QueueInner<T: Send> {
+struct QueueInner<T> {
 
     // Maximum number of elements the queue can contain at one time
     capacity: usize,
@@ -132,7 +132,7 @@ struct QueueInner<T: Send> {
     not_full: Condvar,
 }
 
-impl<T: Send> QueueInner<T> {
+impl<T> QueueInner<T> {
     fn new(capacity: usize) -> QueueInner<T> {
         let head = NodePtr::new(Node::empty());
 
@@ -260,14 +260,14 @@ impl<T: Send> QueueInner<T> {
     }
 }
 
-impl<T: Send> Drop for QueueInner<T> {
+impl<T> Drop for QueueInner<T> {
     fn drop(&mut self) {
         while let Some(_) = self.poll() {
         }
     }
 }
 
-fn dequeue<T: Send>(mut head: &mut MutexGuard<NodePtr<T>>) -> T {
+fn dequeue<T>(mut head: &mut MutexGuard<NodePtr<T>>) -> T {
     let h = **head;
     let mut first = h.next;
     **head = first;
@@ -275,19 +275,19 @@ fn dequeue<T: Send>(mut head: &mut MutexGuard<NodePtr<T>>) -> T {
     first.item.take().expect("item already consumed")
 }
 
-fn enqueue<T: Send>(node: Node<T>, mut last: &mut MutexGuard<NodePtr<T>>) {
+fn enqueue<T>(node: Node<T>, mut last: &mut MutexGuard<NodePtr<T>>) {
     let ptr = NodePtr::new(node);
 
     last.next = ptr;
     **last = ptr;
 }
 
-struct Node<T: Send> {
+struct Node<T> {
     next: NodePtr<T>,
     item: Option<T>,
 }
 
-impl<T: Send> Node<T> {
+impl<T> Node<T> {
     fn new(val: T) -> Node<T> {
         Node {
             next: NodePtr::null(),
@@ -303,11 +303,11 @@ impl<T: Send> Node<T> {
     }
 }
 
-struct NodePtr<T: Send> {
+struct NodePtr<T> {
     ptr: *mut Node<T>,
 }
 
-impl<T: Send> NodePtr<T> {
+impl<T> NodePtr<T> {
     fn new(node: Node<T>) -> NodePtr<T> {
         NodePtr { ptr: unsafe { mem::transmute(Box::new(node)) }}
     }
@@ -322,7 +322,7 @@ impl<T: Send> NodePtr<T> {
     }
 }
 
-impl<T: Send> ops::Deref for NodePtr<T> {
+impl<T> ops::Deref for NodePtr<T> {
     type Target = Node<T>;
 
     fn deref(&self) -> &Node<T> {
@@ -330,17 +330,17 @@ impl<T: Send> ops::Deref for NodePtr<T> {
     }
 }
 
-impl<T: Send> ops::DerefMut for NodePtr<T> {
+impl<T> ops::DerefMut for NodePtr<T> {
     fn deref_mut(&mut self) -> &mut Node<T> {
         unsafe { mem::transmute(self.ptr) }
     }
 }
 
-impl<T: Send> Clone for NodePtr<T> {
+impl<T> Clone for NodePtr<T> {
     fn clone(&self) -> NodePtr<T> {
         NodePtr { ptr: self.ptr }
     }
 }
 
-impl<T: Send> Copy for NodePtr<T> {}
+impl<T> Copy for NodePtr<T> {}
 unsafe impl<T: Send> Send for NodePtr<T> {}

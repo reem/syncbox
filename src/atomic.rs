@@ -19,7 +19,7 @@ pub use self::types::{
  */
 
 /// An atomic box
-pub trait Atomic<T> : Send + Sync {
+pub trait Atomic<T> {
 
     /// Returns a new atomic box
     fn new(val: T) -> Self;
@@ -39,7 +39,7 @@ pub trait Atomic<T> : Send + Sync {
 }
 
 /// A value that can be stored in an atomic box
-pub trait ToAtomicRepr : Send + Sync {
+pub trait ToAtomicRepr {
 
     /// The representation of the value when stored in an atomic box.
     type Repr;

@@ -54,7 +54,7 @@ impl<T> ops::DerefMut for Delay<T> {
 /// the queue, a delay is included. The value will only be able to be popped
 /// off once the specified delay has expired. The head of the queue is the
 /// value whose delay is expired and furthest in the past.
-pub struct DelayQueue<T: Delayed + Send> {
+pub struct DelayQueue<T: Delayed> {
     inner: Arc<Inner<T>>,
 }
 
@@ -63,7 +63,7 @@ struct Inner<T> {
     condvar: Condvar,
 }
 
-impl<T: Delayed + Send> DelayQueue<T> {
+impl<T: Delayed> DelayQueue<T> {
     /// Create a new `DelayQueue`
     pub fn new() -> DelayQueue<T> {
         DelayQueue {
@@ -111,7 +111,7 @@ impl<T: Delayed + Send> DelayQueue<T> {
     }
 }
 
-impl<T: Delayed + Send> Queue<T> for DelayQueue<T> {
+impl<T: Delayed> Queue<T> for DelayQueue<T> {
     fn poll(&self) -> Option<T> {
         let queue = self.inner.queue.lock().unwrap();
 
@@ -150,7 +150,7 @@ impl<T: Delayed + Send> Queue<T> for DelayQueue<T> {
     }
 }
 
-impl<T: Delayed + Send> SyncQueue<T> for DelayQueue<T> {
+impl<T: Delayed> SyncQueue<T> for DelayQueue<T> {
     fn take(&self) -> T {
         enum Need {
             Wait,
@@ -194,7 +194,7 @@ impl<T: Delayed + Send> SyncQueue<T> for DelayQueue<T> {
     }
 }
 
-impl<T: Delayed + Send> Clone for DelayQueue<T> {
+impl<T: Delayed> Clone for DelayQueue<T> {
     fn clone(&self) -> DelayQueue<T> {
         DelayQueue { inner: self.inner.clone() }
     }
